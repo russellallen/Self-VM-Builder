@@ -47,12 +47,12 @@ class BuildTarget(object):
     #
 
     def compile(self):
-        self.boot()
         self.sync_sources()
+        self.clean_log()
+        self.print_system_info()
         self.cmake()
         self.build_and_test_world()
         self.extract_built_vm()
-        self.poweroff()
         return self
 
     def boot(self):
@@ -70,6 +70,7 @@ class BuildTarget(object):
                              shell=True, capture_output=True).returncode > 0:
             time.sleep(1)
         print("Connected")
+        return self
 
     def sync_sources(self):
         print("Syncing Sources")
@@ -82,9 +83,21 @@ class BuildTarget(object):
         # Change ownership inside VM
         self.do(self.chown + " -R root /self")
 
-    def cmake(self):
+    def clean_log(self):
         # Clean output file
         os.remove(self.working_dir + '/out.txt')
+
+    def print_system_info(self):
+        self.do("echo ---------------------------------------------------------------------------------")
+        self.do("echo OS: $(uname -a)")
+        self.do("echo GIT: $(git --version)")
+        self.do("echo CMAKE: $(cmake --version)")
+        self.do("echo CC: $(cc --version)")
+        self.do("echo CPP: $(cpp --version)")
+        self.do("echo AS: $(as --version)")
+        self.do("echo ---------------------------------------------------------------------------------")
+
+    def cmake(self):
         self.do("""rm -rf /root/build""")
         self.do("""mkdir /root/build""")
         self.do("""cd /root/build ; cmake /self""")
@@ -107,10 +120,15 @@ class BuildTarget(object):
     def poweroff(self):
         print("Shutting down")
         self.do("/sbin/shutdown -p now")
+        return self
 
     def wait_for_poweroff(self):
         while os.path.isfile(self.working_dir + '/pid'):
             time.sleep(1)
+
+    def wait_for_user(self):
+        input("Press Enter Key to Continue...")
+        return self
 
     #
     #   Support
@@ -189,9 +207,14 @@ class Debian(BuildTarget):
         print("Shutting down")
         # Capital -P
         self.do("/sbin/shutdown -P now")
+        return self
 
-if __name__ == "__main__":
+
+def main():
     src = "/home/russell/unsynced/nbuwe/self/git/"
-    NetBSD(vm_sources=src).compile().wait_for_poweroff()
-    FreeBSD(vm_sources=src).compile().wait_for_poweroff()
-    Debian(vm_sources=src).compile().wait_for_poweroff()
+    for i in [NetBSD, FreeBSD, Debian]:
+        i(vm_sources=src).boot().compile().poweroff().wait_for_poweroff()
+
+        
+if __name__ == "__main__":
+    main()

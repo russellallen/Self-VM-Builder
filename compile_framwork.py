@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+from pathlib import Path
 
 
 class BuildTarget(object):
@@ -12,16 +13,22 @@ class BuildTarget(object):
         self.iso_url = 'https://example.com/some.iso'
         self.qcow2 = 'some.qcow2'
         self.chown = 'path/to chown'
+        self.cmake_flags = ''
 
     #
     #   Setting Up
     #
 
-    def initialise_os_vm(self):
+    def install_os_in_vm(self):
         self.download_iso()
         self.create_qcow()
+        # This is manual
         self.install_os()
+        # Automatic from here...
+        self.boot()
         self.initialise_os()
+        self.poweroff()
+        self.wait_for_poweroff()
 
     def download_iso(self):
         if not os.path.exists(self.working_dir + '/' + self.iso_filename):
@@ -33,10 +40,19 @@ class BuildTarget(object):
             os.system('qemu-img create -f qcow2 ' + self.working_dir + '/' + self.qcow2 + ' 16G')
 
     def install_os(self):
-        os.system(
-            'qemu-system-x86_64 --m 4G -boot d -cdrom ' +
-            self.working_dir + '/' + self.iso_filename +
-            ' -hda ' + self.working_dir + '/' + self.qcow2)
+        print("Running OS Installer")
+        self.run_qemu(with_cdrom=True)
+        # manually install OS
+        # When doing setup, remember
+        # (1)
+        # vi /etc/ssh/sshd_config and
+        # PermitRootLogin yes
+        # (2)
+        # install vim (for xxd)
+        # (3)
+        # root:Pass123
+        time.sleep(10)
+        self.wait_for_poweroff()
 
     def initialise_os(self):
         # Add packages
@@ -55,16 +71,20 @@ class BuildTarget(object):
         self.extract_built_vm()
         return self
 
+    def run_qemu(self, with_cdrom=False):
+        cmd = "qemu-system-x86_64 --enable-kvm -nic user,hostfwd=tcp::8888-:22 -daemonize --m 4G -boot d "
+        if with_cdrom:
+            cmd = cmd + '-cdrom ' + self.working_dir + '/' + self.iso_filename
+        cmd = cmd + " -pidfile " + self.working_dir + '/pid '
+        cmd = cmd + " -hda " + self.working_dir + '/' + self.qcow2 + ' '
+        print('QEMU: ' + cmd)
+        subprocess.run(cmd, shell=True)  # , capture_output=True)
+
     def boot(self):
         print("Removing SSH Key")
         subprocess.run(["ssh-keygen", "-f", "/home/russell/.ssh/known_hosts", "-R", "[localhost]:8888"])
         print("Booting...")
-        # --curses
-        subprocess.run(
-            """qemu-system-x86_64 --enable-kvm -nic user,hostfwd=tcp::8888-:22 --m 4G -boot d """ +
-            """-pidfile """ + self.working_dir + '/pid ' +
-            """-hda """ + self.working_dir + '/' + self.qcow2 + ' &',
-            shell=True)  # , capture_output=True)
+        self.run_qemu()
         # Wait for ssh
         while subprocess.run('sshpass -p Pass123 ssh root@localhost -p 8888 -o "StrictHostKeyChecking=no" true',
                              shell=True, capture_output=True).returncode > 0:
@@ -85,23 +105,21 @@ class BuildTarget(object):
 
     def clean_log(self):
         # Clean output file
-        os.remove(self.working_dir + '/out.txt')
+        os.remove(self.working_dir + '/' + self.working_dir + '.out.txt')
 
     def print_system_info(self):
         self.do("echo ---------------------------------------------------------------------------------")
+        self.do("echo BUILDING: $(date)")
         self.do("echo OS: $(uname -a)")
         self.do("echo GIT: $(git --version)")
         self.do("echo CMAKE: $(cmake --version)")
-        self.do("echo CC: $(cc --version)")
-        self.do("echo CPP: $(cpp --version)")
-        self.do("echo AS: $(as --version)")
         self.do("echo ---------------------------------------------------------------------------------")
 
     def cmake(self):
-        self.do("""rm -rf /root/build""")
-        self.do("""mkdir /root/build""")
-        self.do("""cd /root/build ; cmake /self""")
-        self.do("""export PATH=$PATH:/sbin:/usr/sbin ; cd /root/build ; cmake --build .""")
+        self.do("rm -rf /root/build")
+        self.do("mkdir /root/build")
+        self.do("cd /root/build ; " + self.cmake_flags + " cmake -DCMAKE_BUILD_TYPE=Release /self")
+        self.do("export PATH=$PATH:/sbin:/usr/sbin ; cd /root/build ; cmake --build .")
 
     def extract_built_vm(self):
         subprocess.run(
@@ -123,10 +141,14 @@ class BuildTarget(object):
         return self
 
     def wait_for_poweroff(self):
-        while os.path.isfile(self.working_dir + '/pid'):
+        p = Path(self.working_dir + '/pid').read_text()
+        while not os.system('kill -0 ' + p):
             time.sleep(1)
+        os.remove(self.working_dir + '/pid')
+        return self
 
     def wait_for_user(self):
+
         input("Press Enter Key to Continue...")
         return self
 
@@ -136,12 +158,13 @@ class BuildTarget(object):
     def do(self, command, silent=False):
         msg = "\n> " + command + '\n\n'
         print(msg)
-        with open(self.working_dir + "/out.txt", 'a') as f:
+        with open(self.working_dir + "/" + self.working_dir + ".out.txt", 'a') as f:
             f.write(msg)
         b = bytes(command, 'ascii').hex()
         c = "echo " + b + " | xxd -r -p | /bin/sh"
         subprocess.run(
-            "sshpass -p Pass123 ssh root@localhost -p 8888 '" + c + "' 2>&1 | tee -a " + self.working_dir + "/out.txt",
+            "sshpass -p Pass123 ssh root@localhost -p 8888 '" + c + "' 2>&1 | " +
+            "tee -a " + self.working_dir + "/" + self.working_dir + ".out.txt",
             shell=True,
             capture_output=silent)
 
@@ -169,18 +192,18 @@ class FreeBSD(BuildTarget):
         self.vm_sources = vm_sources
         self.working_dir = 'FreeBSD'
         self.iso_filename = 'FreeBSD-13.1-RELEASE-i386-disc1.iso'
+        self.iso_filename = 'FreeBSD-13.1-RELEASE-i386-disc1.iso'
         self.iso_url = \
             'https://download.freebsd.org/releases/i386/i386/ISO-IMAGES/13.1/FreeBSD-13.1-RELEASE-i386-disc1.iso'
         self.qcow2 = 'FreeBSD-13.1-RELEASE-i386.qcow2'
         self.chown = '/usr/sbin/chown'
+        self.cmake_flags = ' CC=gcc CPP=g++ '
 
     def initialise_os(self):
-        # When doing setup, remember
-        # vi /etc/ssh/sshd_config and
-        # PermitRootLogin yes
-        #
         # Add packages
-        self.do('pkg install -y rsync cmake git vim libX11 libXext')  # vim is for xxd
+        self.do('pkg install -y rsync cmake git vim libX11 libXext gcc')  # vim is for xxd
+        # So gcc works
+        self.do('echo "libgcc_s.so.1		/usr/local/lib/gcc12/libgcc_s.so.1" >> /etc/libmap.conf')
 
 
 class Debian(BuildTarget):
@@ -196,10 +219,6 @@ class Debian(BuildTarget):
         self.chown = '/usr/bin/chown'
 
     def initialise_os(self):
-        # When doing setup, remember
-        # vi /etc/ssh/sshd_config and
-        # PermitRootLogin yes
-        #
         # Add packages
         self.do('apt install -y rsync cmake git vim build-essential xorg-dev libncurses5-dev')  # vim is for xxd
 
@@ -212,9 +231,10 @@ class Debian(BuildTarget):
 
 def main():
     src = "/home/russell/unsynced/nbuwe/self/git/"
-    for i in [NetBSD, FreeBSD, Debian]:
-        i(vm_sources=src).boot().compile().poweroff().wait_for_poweroff()
+    for i in [FreeBSD]:  # NetBSD, FreeBSD, Debian]:
+        # i(vm_sources=src).install_os_in_vm()
+        i(vm_sources=src).boot().compile().wait_for_user().poweroff().wait_for_poweroff()
 
-        
+
 if __name__ == "__main__":
     main()

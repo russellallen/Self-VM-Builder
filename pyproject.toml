@@ -1,12 +1,13 @@
 [tool.poetry]
-name = "ci"
+name = "Self-VM-Builder"
 version = "0.1.0"
 description = ""
-authors = ["Your Name <you@example.com>"]
+authors = ["Russell Allen <mail@russell-allen.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.8"
+path = "^16.6.0"
 
 
 [build-system]

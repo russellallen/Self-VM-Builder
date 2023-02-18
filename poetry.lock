@@ -1,8 +1,19 @@
-package = []
+[[package]]
+name = "path"
+version = "16.6.0"
+description = "A module wrapper for os.path"
+category = "main"
+optional = false
+python-versions = ">=3.7"
+
+[package.extras]
+docs = ["sphinx (>=3.5)", "jaraco.packaging (>=9)", "rst.linker (>=1.9)", "furo", "jaraco.tidelift (>=1.4)"]
+testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "flake8 (<5)", "pytest-cov", "pytest-enabler (>=1.3)", "appdirs", "packaging", "pygments", "pytest-black (>=0.3.7)", "pytest-mypy (>=0.9.1)", "pywin32", "pytest-flake8"]
 
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.8"
-content-hash = "935b488be9f11b23f14aa1ce3bed4013d88bd77462534b5e4fe5bb82b485bfe9"
+content-hash = "fc41a32aa090abea6baaa18cc9a1003c30e1d94009c010a57f7f7bd1f6c1ecd3"
 
 [metadata.files]
+path = []

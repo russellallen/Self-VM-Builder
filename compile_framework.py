@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -13,7 +14,8 @@ class BuildTarget(object):
         self.iso_url = 'https://example.com/some.iso'
         self.qcow2 = 'some.qcow2'
         self.chown = 'path/to chown'
-        self.cmake_flags = ''
+        self.env_flags = ''
+        self.cmake_build_options = ''
 
     #
     #   Setting Up
@@ -51,6 +53,9 @@ class BuildTarget(object):
         # install vim (for xxd)
         # (3)
         # root:Pass123
+        # (4)
+        # change root shell to bash
+        # e.g. chsh -s /path/to/bash root
         time.sleep(10)
         self.wait_for_poweroff()
 
@@ -65,11 +70,16 @@ class BuildTarget(object):
     def compile(self):
         self.sync_sources()
         self.clean_log()
+        self.per_run_setup()
         self.print_system_info()
         self.cmake()
         self.build_and_test_world()
         self.extract_built_vm()
         return self
+
+    def per_run_setup(self):
+        # Things we might want to do before each run
+        pass
 
     def run_qemu(self, with_cdrom=False):
         cmd = "qemu-system-x86_64 --enable-kvm -nic user,hostfwd=tcp::8888-:22 -daemonize --m 4G -boot d "
@@ -116,10 +126,11 @@ class BuildTarget(object):
         self.do("echo ---------------------------------------------------------------------------------")
 
     def cmake(self):
-        self.do("rm -rf /root/build")
-        self.do("mkdir /root/build")
-        self.do("cd /root/build ; " + self.cmake_flags + " cmake -DCMAKE_BUILD_TYPE=Release /self")
-        self.do("export PATH=$PATH:/sbin:/usr/sbin ; cd /root/build ; cmake --build .")
+        self.do("rm -rf /root/build ; mkdir /root/build")
+        self.do("cd /root/build ; " + self.env_flags + "  cmake " + self.cmake_build_options + " /self")
+        self.do("cd /root/build ; cmake --build .")
+# export PATH=$PATH:/sbin:/usr/sbin ;
+    # -DCMAKE_BUILD_TYPE=Release
 
     def extract_built_vm(self):
         subprocess.run(
@@ -161,9 +172,9 @@ class BuildTarget(object):
         with open(self.working_dir + "/" + self.working_dir + ".out.txt", 'a') as f:
             f.write(msg)
         b = bytes(command, 'ascii').hex()
-        c = "echo " + b + " | xxd -r -p | /bin/sh"
+        c = "echo " + b + " | xxd -r -p | bash"
         subprocess.run(
-            "sshpass -p Pass123 ssh root@localhost -p 8888 '" + c + "' 2>&1 | " +
+            "sshpass -p Pass123 ssh root@localhost -q -p 8888 'source ~/.profile > /dev/null; " + c + "' 2>&1 | " +
             "tee -a " + self.working_dir + "/" + self.working_dir + ".out.txt",
             shell=True,
             capture_output=silent)
@@ -182,7 +193,11 @@ class NetBSD(BuildTarget):
 
     def initialise_os(self):
         # Add packages
-        self.do('pkgin -y install rsync cmake git vim libX11 libXext')  # vim is for xxd
+        self.do('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
+
+    def per_run_setup(self):
+        # Turn off ASLR for clean build
+        self.do("/sbin/sysctl -w security.pax.aslr.global=0")
 
 
 class FreeBSD(BuildTarget):
@@ -198,10 +213,11 @@ class FreeBSD(BuildTarget):
         self.qcow2 = 'FreeBSD-13.1-RELEASE-i386.qcow2'
         self.chown = '/usr/sbin/chown'
         self.cmake_flags = ' CC=gcc CPP=g++ '
+        self.build_flags = ' -DCMAKE_BUILD_TYPE=Release '
 
     def initialise_os(self):
         # Add packages
-        self.do('pkg install -y rsync cmake git vim libX11 libXext gcc')  # vim is for xxd
+        self.do('pkg install -y rsync cmake git vim libX11 libXext gcc bash')  # vim is for xxd
         # So gcc works
         self.do('echo "libgcc_s.so.1		/usr/local/lib/gcc12/libgcc_s.so.1" >> /etc/libmap.conf')
 
@@ -229,12 +245,37 @@ class Debian(BuildTarget):
         return self
 
 
-def main():
-    src = "/home/russell/unsynced/nbuwe/self/git/"
-    for i in [FreeBSD]:  # NetBSD, FreeBSD, Debian]:
-        # i(vm_sources=src).install_os_in_vm()
-        i(vm_sources=src).boot().compile().wait_for_user().poweroff().wait_for_poweroff()
-
-
 if __name__ == "__main__":
-    main()
+    src = "/home/russell/unsynced/nbuwe/self/git/"
+    # script all|target action
+    # eg script all compile
+    #    script NetBSD boot
+    if len(sys.argv) == 3:
+        target = sys.argv[1]
+        if target == 'all':
+            i = [NetBSD, FreeBSD, Debian]
+        else:
+            try:
+                i = [getattr(sys.modules[__name__], target)]
+            except AttributeError:
+                print("Unknown target: " + target)
+                sys.exit(1)
+        action = sys.argv[2]
+        if action == 'boot':
+            for vm in i:
+                vm(vm_sources=src).boot()
+                os.system("sshpass -p Pass123 ssh root@localhost -p 8888")
+                vm(vm_sources=src).poweroff().wait_for_poweroff()
+        elif action == 'compile':
+            for vm in i:
+                vm(vm_sources=src).boot().compile().poweroff().wait_for_poweroff()
+        elif action == 'install':
+            for vm in i:
+                vm(vm_sources=src).install_os_in_vm()
+        else:
+            print("Unknown action: " + action)
+            sys.exit(1)
+    else:
+        print("Wrong! Try again! (No help for YOU!")
+        sys.exit(1)
+    sys.exit(0)

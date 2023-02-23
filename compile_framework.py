@@ -16,6 +16,9 @@ class BuildTarget(object):
         self.chown = 'path/to chown'
         self.env_flags = ''
         self.cmake_build_options = ''
+        # Defaults for x86 on x86
+        self.qemu_binary = 'qemu-system-x86_64'
+        self.use_kvm = True
 
     #
     #   Setting Up
@@ -82,7 +85,10 @@ class BuildTarget(object):
         pass
 
     def run_qemu(self, with_cdrom=False):
-        cmd = "qemu-system-x86_64 --enable-kvm -nic user,hostfwd=tcp::8888-:22 -daemonize --m 4G -boot d "
+        cmd = self.qemu_binary
+        if self.use_kvm:
+            cmd = cmd + " --enable-kvm "
+        cmd = cmd + " -nic user,hostfwd=tcp::8888-:22 -daemonize --m 4G -boot d "
         if with_cdrom:
             cmd = cmd + '-cdrom ' + self.working_dir + '/' + self.iso_filename
         cmd = cmd + " -pidfile " + self.working_dir + '/pid '
@@ -118,19 +124,17 @@ class BuildTarget(object):
         os.remove(self.working_dir + '/' + self.working_dir + '.out.txt')
 
     def print_system_info(self):
-        self.do("echo ---------------------------------------------------------------------------------")
-        self.do("echo BUILDING: $(date)")
-        self.do("echo OS: $(uname -a)")
-        self.do("echo GIT: $(git --version)")
-        self.do("echo CMAKE: $(cmake --version)")
-        self.do("echo ---------------------------------------------------------------------------------")
+        self.do("echo ------------------------------------------------------------", silent=True)
+        self.do("echo BUILDING: $(date)", silent=True)
+        self.do("echo OS: $(uname -a)", silent=True)
+        self.do("echo GIT: $(git --version)", silent=True)
+        self.do("echo CMAKE: $(cmake --version)", silent=True)
+        self.do("echo ------------------------------------------------------------", silent=True)
 
     def cmake(self):
         self.do("rm -rf /root/build ; mkdir /root/build")
         self.do("cd /root/build ; " + self.env_flags + "  cmake " + self.cmake_build_options + " /self")
         self.do("cd /root/build ; cmake --build .")
-# export PATH=$PATH:/sbin:/usr/sbin ;
-    # -DCMAKE_BUILD_TYPE=Release
 
     def extract_built_vm(self):
         subprocess.run(
@@ -140,11 +144,8 @@ class BuildTarget(object):
 
     def build_and_test_world(self):
         self.do(
-            "cd /self/objects ; echo 'benchmarks suite do: [|:b| b printLine. b run]. _Quit' | " +
+            "cd /self/objects ; echo 'tests runVMSuite. benchmarks suite do: [|:b| b printLine. b run]. _Quit' | " +
             "/root/build/vm/Self -f worldBuilder.self -o morphic")
-
-    def open_ssh(self):
-        self.do('/bin/sh', silent=False)
 
     def poweroff(self):
         print("Shutting down")
@@ -167,10 +168,11 @@ class BuildTarget(object):
     #   Support
     #
     def do(self, command, silent=False):
-        msg = "\n> " + command + '\n\n'
-        print(msg)
-        with open(self.working_dir + "/" + self.working_dir + ".out.txt", 'a') as f:
-            f.write(msg)
+        if not silent:
+            msg = "\n> " + command + '\n\n'
+            print(msg)
+            with open(self.working_dir + "/" + self.working_dir + ".out.txt", 'a') as f:
+                f.write(msg)
         b = bytes(command, 'ascii').hex()
         c = "echo " + b + " | xxd -r -p | bash"
         subprocess.run(
@@ -200,6 +202,28 @@ class NetBSD(BuildTarget):
         self.do("/sbin/sysctl -w security.pax.aslr.global=0")
 
 
+class NetBSDmacppc(BuildTarget):
+
+    def __init__(self, vm_sources):
+        super().__init__(vm_sources)
+        self.vm_sources = vm_sources
+        self.working_dir = 'NetBSDmacppc'
+        self.iso_filename = 'NetBSD-9.3-macppc.iso'
+        self.iso_url = 'https://cdn.netbsd.org/pub/NetBSD/NetBSD-9.3/images/NetBSD-9.3-macppc.iso'
+        self.qcow2 = 'NetBSD-9.3-macppc.qcow2'
+        self.chown = '/sbin/chown'
+        self.qemu_binary = 'qemu-system-ppc'
+        self.use_kvm = False
+
+    def initialise_os(self):
+        # Add packages
+        self.do('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
+
+    def per_run_setup(self):
+        # Turn off ASLR for clean build
+        self.do("/sbin/sysctl -w security.pax.aslr.global=0")
+
+
 class FreeBSD(BuildTarget):
 
     def __init__(self, vm_sources):
@@ -207,13 +231,12 @@ class FreeBSD(BuildTarget):
         self.vm_sources = vm_sources
         self.working_dir = 'FreeBSD'
         self.iso_filename = 'FreeBSD-13.1-RELEASE-i386-disc1.iso'
-        self.iso_filename = 'FreeBSD-13.1-RELEASE-i386-disc1.iso'
         self.iso_url = \
             'https://download.freebsd.org/releases/i386/i386/ISO-IMAGES/13.1/FreeBSD-13.1-RELEASE-i386-disc1.iso'
         self.qcow2 = 'FreeBSD-13.1-RELEASE-i386.qcow2'
         self.chown = '/usr/sbin/chown'
-        self.cmake_flags = ' CC=gcc CPP=g++ '
-        self.build_flags = ' -DCMAKE_BUILD_TYPE=Release '
+        self.env_flags = ' CC=gcc CPP=g++ '
+        self.cmake_build_options = ' -DCMAKE_BUILD_TYPE=Release '
 
     def initialise_os(self):
         # Add packages
@@ -246,9 +269,9 @@ class Debian(BuildTarget):
 
 
 if __name__ == "__main__":
-    src = "/home/russell/unsynced/nbuwe/self/git/"
+    src = "/home/russell/unsynced/self/"
     # script all|target action
-    # eg script all compile
+    # e.g. script all compile
     #    script NetBSD boot
     if len(sys.argv) == 3:
         target = sys.argv[1]

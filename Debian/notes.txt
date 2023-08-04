@@ -1,0 +1,9 @@
+For running on a modern 64bit Linux.
+
+On Debian and Ubuntu derivatives:
+
+sudo dpkg --add-architecture i386
+sudo apt-get update
+sudo apt-get install libc6:i386 libncurses5:i386 libstdc++6:i386 libtinfo6:i386 libx11-6:i386 libxext6:i386
+
+gt

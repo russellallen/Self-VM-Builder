@@ -2,12 +2,13 @@ import os
 import subprocess
 import sys
 import time
+from rich import print
 from pathlib import Path
-
+import random
 
 class BuildTarget(object):
 
-    def __init__(self, vm_sources):
+    def __init__(self, vm_sources:str = ''):
         self.vmSources = vm_sources
         self.working_dir = 'aDirectory'
         self.iso_filename = 'some.iso'
@@ -19,6 +20,15 @@ class BuildTarget(object):
         # Defaults for x86 on x86
         self.qemu_binary = 'qemu-system-x86_64'
         self.use_kvm = True
+        self.vm_memory = '4G'
+        self.forwarded_ssh_port = '0'
+
+
+    #
+    #   Logging
+    #
+    def log_heading(self, msg: str):
+        print('[bold blue]' + msg + '[/bold blue]')
 
     #
     #   Setting Up
@@ -37,15 +47,17 @@ class BuildTarget(object):
 
     def download_iso(self):
         if not os.path.exists(self.working_dir + '/' + self.iso_filename):
+            self.log_heading("Downloading ISO")
             # -L option for following redirects
             os.system('curl -L ' + self.iso_url + ' > ' + self.working_dir + '/' + self.iso_filename)
 
     def create_qcow(self):
         if not os.path.exists(self.working_dir + '/' + self.qcow2):
+            self.log_heading("Creating qcow image")
             os.system('qemu-img create -f qcow2 ' + self.working_dir + '/' + self.qcow2 + ' 16G')
 
     def install_os(self):
-        print("Running OS Installer")
+        self.log_heading("Running OS Installer")
         self.run_qemu(with_cdrom=True)
         # manually install OS
         # When doing setup, remember
@@ -85,10 +97,11 @@ class BuildTarget(object):
         pass
 
     def run_qemu(self, with_cdrom=False):
+        self.forwarded_ssh_port = str(random.randint(10000,65535))
         cmd = self.qemu_binary
         if self.use_kvm:
             cmd = cmd + " --enable-kvm "
-        cmd = cmd + " -nic user,hostfwd=tcp::8888-:22 -daemonize --m 4G -boot d "
+        cmd = cmd + " -nic user,hostfwd=tcp::" + str(self.forwarded_ssh_port) + "-:22 -daemonize --m " + self.vm_memory + " -boot d "
         if with_cdrom:
             cmd = cmd + '-cdrom ' + self.working_dir + '/' + self.iso_filename
         cmd = cmd + " -pidfile " + self.working_dir + '/pid '
@@ -97,23 +110,24 @@ class BuildTarget(object):
         subprocess.run(cmd, shell=True)  # , capture_output=True)
 
     def boot(self):
-        print("Removing SSH Key")
-        subprocess.run(["ssh-keygen", "-f", "/home/russell/.ssh/known_hosts", "-R", "[localhost]:8888"])
-        print("Booting...")
+        self.log_heading("Removing SSH Key")
+        subprocess.run(["ssh-keygen", "-f", "/home/russell/.ssh/known_hosts", "-R", "[localhost]:" + self.forwarded_ssh_port])
+        self.log_heading("Booting...")
         self.run_qemu()
         # Wait for ssh
-        while subprocess.run('sshpass -p Pass123 ssh root@localhost -p 8888 -o "StrictHostKeyChecking=no" true',
+        while subprocess.run('sshpass -p Pass123 ssh -o IdentitiesOnly=yes root@localhost -p ' + self.forwarded_ssh_port + ' -o "StrictHostKeyChecking=no" true',
                              shell=True, capture_output=True).returncode > 0:
             time.sleep(1)
+            print('.', end='', flush=True)
         print("Connected")
         return self
 
     def sync_sources(self):
-        print("Syncing Sources")
+        self.log_heading("Syncing Sources")
         # ignore-times because if vm is killed, corruption of NetBSD filesystem happens,
         # so we want to make sure files are correct
-        cmd = """sshpass -p Pass123 rsync --ignore-times -raz -e 'ssh -p 8888' """ + \
-              self.vmSources + """ root@localhost:/self"""
+        cmd = """sshpass -p Pass123 rsync --ignore-times -raz -e 'ssh -o IdentitiesOnly=yes -p """ + self.forwarded_ssh_port + """' '""" + \
+              self.vmSources + """' root@localhost:/self"""
         print(cmd)
         subprocess.run(cmd, shell=True)
         # Change ownership inside VM
@@ -138,17 +152,17 @@ class BuildTarget(object):
 
     def extract_built_vm(self):
         subprocess.run(
-            """sshpass -p Pass123 scp -P 8888 root@localhost:/root/build/vm/Self """ + self.working_dir + """/.""",
+            """sshpass -p Pass123 scp -o IdentitiesOnly=yes -P """ + self.forwarded_ssh_port + """ root@localhost:/root/build/vm/Self """ + self.working_dir + """/.""",
             shell=True,
             capture_output=False)
 
     def build_and_test_world(self):
         self.do(
-            "cd /self/objects ; echo 'tests runVMSuite. benchmarks suite do: [|:b| b printLine. b run]. _Quit' | " +
+            "cd /self/objects ; echo 'tests runVMSuite. benchmarks measurePerformance: 100. _Quit' | " +
             "/root/build/vm/Self -f worldBuilder.self -o morphic")
 
     def poweroff(self):
-        print("Shutting down")
+        self.log_heading("Telling VM to shut itself down")
         self.do("/sbin/shutdown -p now")
         return self
 
@@ -160,7 +174,6 @@ class BuildTarget(object):
         return self
 
     def wait_for_user(self):
-
         input("Press Enter Key to Continue...")
         return self
 
@@ -169,14 +182,14 @@ class BuildTarget(object):
     #
     def do(self, command, silent=False):
         if not silent:
-            msg = "\n> " + command + '\n\n'
+            msg = "[green]> " + command + '[/green]'
             print(msg)
             with open(self.working_dir + "/" + self.working_dir + ".out.txt", 'a') as f:
                 f.write(msg)
         b = bytes(command, 'ascii').hex()
         c = "echo " + b + " | xxd -r -p | bash"
         subprocess.run(
-            "sshpass -p Pass123 ssh root@localhost -q -p 8888 'source ~/.profile > /dev/null; " + c + "' 2>&1 | " +
+            "sshpass -p Pass123 ssh -o IdentitiesOnly=yes root@localhost -q -p " + self.forwarded_ssh_port + " 'source ~/.profile > /dev/null; " + c + "' 2>&1 | " +
             "tee -a " + self.working_dir + "/" + self.working_dir + ".out.txt",
             shell=True,
             capture_output=silent)
@@ -212,8 +225,32 @@ class NetBSDmacppc(BuildTarget):
         self.iso_url = 'https://cdn.netbsd.org/pub/NetBSD/NetBSD-9.3/images/NetBSD-9.3-macppc.iso'
         self.qcow2 = 'NetBSD-9.3-macppc.qcow2'
         self.chown = '/sbin/chown'
-        self.qemu_binary = 'qemu-system-ppc'
+        self.qemu_binary = 'qemu-system-ppc -M mac99,via=pmu'
         self.use_kvm = False
+        self.vm_memory = '2048M'
+
+    def initialise_os(self):
+        # Add packages
+        self.do('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
+
+    def per_run_setup(self):
+        # Turn off ASLR for clean build
+        self.do("/sbin/sysctl -w security.pax.aslr.global=0")
+
+
+class NetBSDsparc(BuildTarget):
+
+    def __init__(self, vm_sources):
+        super().__init__(vm_sources)
+        self.vm_sources = vm_sources
+        self.working_dir = 'NetBSDsparc'
+        self.iso_filename = 'NetBSD-9.3-sparc.iso'
+        self.iso_url = 'https://cdn.netbsd.org/pub/NetBSD/NetBSD-9.3/images/NetBSD-9.3-sparc.iso'
+        self.qcow2 = 'NetBSD-9.3-sparc.qcow2'
+        self.chown = '/sbin/chown'
+        self.qemu_binary = 'qemu-system-sparc'
+        self.use_kvm = False
+        self.vm_memory = '256M'
 
     def initialise_os(self):
         # Add packages
@@ -230,10 +267,10 @@ class FreeBSD(BuildTarget):
         super().__init__(vm_sources)
         self.vm_sources = vm_sources
         self.working_dir = 'FreeBSD'
-        self.iso_filename = 'FreeBSD-13.1-RELEASE-i386-disc1.iso'
+        self.iso_filename = 'FreeBSD-13.2-RELEASE-i386-disc1.iso'
         self.iso_url = \
-            'https://download.freebsd.org/releases/i386/i386/ISO-IMAGES/13.1/FreeBSD-13.1-RELEASE-i386-disc1.iso'
-        self.qcow2 = 'FreeBSD-13.1-RELEASE-i386.qcow2'
+            'https://download.freebsd.org/releases/i386/i386/ISO-IMAGES/13.2/FreeBSD-13.2-RELEASE-i386-disc1.iso'
+        self.qcow2 = 'FreeBSD-13.2-RELEASE-i386.qcow2'
         self.chown = '/usr/sbin/chown'
         self.env_flags = ' CC=gcc CPP=g++ '
         self.cmake_build_options = ' -DCMAKE_BUILD_TYPE=Release '
@@ -262,14 +299,24 @@ class Debian(BuildTarget):
         self.do('apt install -y rsync cmake git vim build-essential xorg-dev libncurses5-dev')  # vim is for xxd
 
     def poweroff(self):
-        print("Shutting down")
+        self.log_heading("Shutting down")
         # Capital -P
         self.do("/sbin/shutdown -P now")
         return self
 
 
+def check_for_prerequisites():
+    BuildTarget().log_heading('Checking for Prerequisites...')
+    r = ['git', 'sshpass', 'qemu-system-x86_64', 'curl', 'qemu-img']
+    for b in r:
+        if not subprocess.run('which ' + b, shell=True).returncode == 0:
+            print('Could not find `' + b + '` in path.')
+            sys.exit(1)
+
 if __name__ == "__main__":
-    src = "/home/russell/unsynced/self/"
+    BuildTarget().log_heading('Beginning Self-VM-Builder run...')
+    check_for_prerequisites()
+    src = "/media/russell/1TB Internal/self/"
     # script all|target action
     # e.g. script all compile
     #    script NetBSD boot
@@ -286,9 +333,9 @@ if __name__ == "__main__":
         action = sys.argv[2]
         if action == 'boot':
             for vm in i:
-                vm(vm_sources=src).boot()
-                os.system("sshpass -p Pass123 ssh root@localhost -p 8888")
-                vm(vm_sources=src).poweroff().wait_for_poweroff()
+                v = vm(vm_sources=src).boot()
+                os.system("sshpass -p Pass123 ssh -o IdentitiesOnly=yes root@localhost -p " + v.forwarded_ssh_port)
+                v.poweroff().wait_for_poweroff()
         elif action == 'compile':
             for vm in i:
                 vm(vm_sources=src).boot().compile().poweroff().wait_for_poweroff()
@@ -301,4 +348,5 @@ if __name__ == "__main__":
     else:
         print("Wrong! Try again! (No help for YOU!")
         sys.exit(1)
+    BuildTarget().log_heading('Task Finished')
     sys.exit(0)

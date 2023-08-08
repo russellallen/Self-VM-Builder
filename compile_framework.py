@@ -22,7 +22,7 @@ class BuildTarget(object):
         self.use_kvm = True
         self.vm_memory = '4G'
         self.forwarded_ssh_port = '0'
-
+        self.bash_profile = '~/.profile'
 
     #
     #   Logging
@@ -124,6 +124,8 @@ class BuildTarget(object):
 
     def sync_sources(self):
         self.log_heading("Syncing Sources")
+        # Full copy each time to make things more predictable
+        self.do_on_qemu('rm -rf /self')
         # ignore-times because if vm is killed, corruption of NetBSD filesystem happens,
         # so we want to make sure files are correct
         cmd = """sshpass -p Pass123 rsync --ignore-times -raz -e 'ssh -o IdentitiesOnly=yes -p """ + self.forwarded_ssh_port + """' '""" + \
@@ -131,24 +133,26 @@ class BuildTarget(object):
         print(cmd)
         subprocess.run(cmd, shell=True)
         # Change ownership inside VM
-        self.do(self.chown + " -R root /self")
+        self.do_on_qemu(self.chown + " -R root /self")
 
     def clean_log(self):
         # Clean output file
         os.remove(self.working_dir + '/' + self.working_dir + '.out.txt')
 
     def print_system_info(self):
-        self.do("echo ------------------------------------------------------------", silent=True)
-        self.do("echo BUILDING: $(date)", silent=True)
-        self.do("echo OS: $(uname -a)", silent=True)
-        self.do("echo GIT: $(git --version)", silent=True)
-        self.do("echo CMAKE: $(cmake --version)", silent=True)
-        self.do("echo ------------------------------------------------------------", silent=True)
+        self.log_heading("Build System Info")
+        self.do_on_qemu("echo ------------------------------------------------------------", silent=True)
+        self.do_on_qemu("echo BUILDING: $(date)", silent=True)
+        self.do_on_qemu("echo OS: $(uname -a)", silent=True)
+        self.do_on_qemu("echo GIT: $(git --version)", silent=True)
+        self.do_on_qemu("echo CMAKE: $(cmake --version)", silent=True)
+        self.do_on_qemu("echo CPP: $(cpp --version)", silent=True)
+        self.do_on_qemu("echo ------------------------------------------------------------", silent=True)
 
     def cmake(self):
-        self.do("rm -rf /root/build ; mkdir /root/build")
-        self.do("cd /root/build ; " + self.env_flags + "  cmake " + self.cmake_build_options + " /self")
-        self.do("cd /root/build ; cmake --build .")
+        self.do_on_qemu("rm -rf /root/build ; mkdir /root/build")
+        self.do_on_qemu("cd /root/build ; " + self.env_flags + "  cmake " + self.cmake_build_options + " /self")
+        self.do_on_qemu("cd /root/build ; cmake --build .")
 
     def extract_built_vm(self):
         subprocess.run(
@@ -157,13 +161,14 @@ class BuildTarget(object):
             capture_output=False)
 
     def build_and_test_world(self):
-        self.do(
-            "cd /self/objects ; echo 'tests runVMSuite. benchmarks measurePerformance: 100. _Quit' | " +
-            "/root/build/vm/Self -f worldBuilder.self -o morphic")
+        self.do_on_qemu(
+            # --runAutomaticTests
+            # "cd /self/objects ; echo 'tests runVMSuite. benchmarks measurePerformance: 100. _Quit' | " +
+            "cd /self/objects ; /root/build/vm/Self -f worldBuilder.self -o morphic -headless --runAutomaticTests ")
 
     def poweroff(self):
         self.log_heading("Telling VM to shut itself down")
-        self.do("/sbin/shutdown -p now")
+        self.do_on_qemu("/sbin/shutdown -p now")
         return self
 
     def wait_for_poweroff(self):
@@ -180,16 +185,16 @@ class BuildTarget(object):
     #
     #   Support
     #
-    def do(self, command, silent=False):
+    def do_on_qemu(self, command, silent=False):
         if not silent:
             msg = "[green]> " + command + '[/green]'
             print(msg)
             with open(self.working_dir + "/" + self.working_dir + ".out.txt", 'a') as f:
                 f.write(msg)
         b = bytes(command, 'ascii').hex()
-        c = "echo " + b + " | xxd -r -p | bash"
+        c = "echo " + b + " | xxd -r -p > /tmp/qemu_cmd ; bash /tmp/qemu_cmd"
         subprocess.run(
-            "sshpass -p Pass123 ssh -o IdentitiesOnly=yes root@localhost -q -p " + self.forwarded_ssh_port + " 'source ~/.profile > /dev/null; " + c + "' 2>&1 | " +
+            "sshpass -p Pass123 ssh -o IdentitiesOnly=yes root@localhost -t -t -q -p " + self.forwarded_ssh_port + " 'source " + self.bash_profile + " > /dev/null; " + c + "' 2>&1 | " +
             "tee -a " + self.working_dir + "/" + self.working_dir + ".out.txt",
             shell=True,
             capture_output=silent)
@@ -208,11 +213,11 @@ class NetBSD(BuildTarget):
 
     def initialise_os(self):
         # Add packages
-        self.do('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
+        self.do_on_qemu('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
 
     def per_run_setup(self):
         # Turn off ASLR for clean build
-        self.do("/sbin/sysctl -w security.pax.aslr.global=0")
+        self.do_on_qemu("/sbin/sysctl -w security.pax.aslr.global=0")
 
 
 class NetBSDmacppc(BuildTarget):
@@ -231,11 +236,11 @@ class NetBSDmacppc(BuildTarget):
 
     def initialise_os(self):
         # Add packages
-        self.do('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
+        self.do_on_qemu('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
 
     def per_run_setup(self):
         # Turn off ASLR for clean build
-        self.do("/sbin/sysctl -w security.pax.aslr.global=0")
+        self.do_on_qemu("/sbin/sysctl -w security.pax.aslr.global=0")
 
 
 class NetBSDsparc(BuildTarget):
@@ -254,11 +259,11 @@ class NetBSDsparc(BuildTarget):
 
     def initialise_os(self):
         # Add packages
-        self.do('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
+        self.do_on_qemu('pkgin -y install rsync cmake git vim libX11 libXext bash')  # vim is for xxd
 
     def per_run_setup(self):
         # Turn off ASLR for clean build
-        self.do("/sbin/sysctl -w security.pax.aslr.global=0")
+        self.do_on_qemu("/sbin/sysctl -w security.pax.aslr.global=0")
 
 
 class FreeBSD(BuildTarget):
@@ -277,9 +282,9 @@ class FreeBSD(BuildTarget):
 
     def initialise_os(self):
         # Add packages
-        self.do('pkg install -y rsync cmake git vim libX11 libXext gcc bash')  # vim is for xxd
+        self.do_on_qemu('pkg install -y rsync cmake git xxd libX11 libXext gcc bash')
         # So gcc works
-        self.do('echo "libgcc_s.so.1		/usr/local/lib/gcc12/libgcc_s.so.1" >> /etc/libmap.conf')
+        self.do_on_qemu('echo "libgcc_s.so.1		/usr/local/lib/gcc12/libgcc_s.so.1" >> /etc/libmap.conf')
 
 
 class Debian(BuildTarget):
@@ -288,21 +293,47 @@ class Debian(BuildTarget):
         super().__init__(vm_sources)
         self.vm_sources = vm_sources
         self.working_dir = 'Debian'
-        self.iso_filename = '/debian-11.6.0-i386-netinst.iso'
+        #self.iso_filename = '/debian-11.6.0-i386-netinst.iso'
+        self.iso_filename = '/debian-12.1.0-i386-netinst.iso'
         self.iso_url = \
-            'https://cdimage.debian.org/debian-cd/current/i386/iso-cd/debian-11.6.0-i386-netinst.iso'
-        self.qcow2 = 'debian-11.6.0-i386.qcow2'
+            'https://cdimage.debian.org/debian-cd/current/i386/iso-cd/debian-12.1.0-i386-netinst.iso'
+        self.qcow2 = 'debian-12.1.0-i386.qcow2'
         self.chown = '/usr/bin/chown'
 
     def initialise_os(self):
         # Add packages
-        self.do('apt install -y rsync cmake git vim build-essential xorg-dev libncurses5-dev')  # vim is for xxd
+        self.do_on_qemu('apt install -y rsync cmake git vim build-essential xorg-dev libncurses5-dev')  # vim is for xxd
 
     def poweroff(self):
         self.log_heading("Shutting down")
         # Capital -P
-        self.do("/sbin/shutdown -P now")
+        self.do_on_qemu("/sbin/shutdown -P now")
         return self
+
+
+class Fedora64(BuildTarget):
+
+    def __init__(self, vm_sources):
+        super().__init__(vm_sources)
+        self.vm_sources = vm_sources
+        self.working_dir = 'Fedora64'
+        self.iso_filename = 'Fedora-Workstation-Live-x86_64-38-1.6.iso'
+        self.iso_url = \
+            'https://download.fedoraproject.org/pub/fedora/linux/releases/38/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-38-1.6.iso'
+        self.qcow2 = 'Fedora-Workstation-Live-x86_64-38-1.6.qcow2'
+        self.chown = '/usr/bin/chown'
+        # self.env_flags = 'CC="gcc -m32" CXX="g++ -m32"'
+        self.bash_profile = '~/.bash_profile'
+
+    def initialise_os(self):
+        # Add packages
+        self.do_on_qemu('dnf -y groupinstall "Development Tools" ; dnf -y install glibc-devel.i686 libX11-devel.i686 libXext-devel.i686 ncurses-devel.i686 cmake clang')  # vim is for xxdsudo dnf -y install glibc-devel.i686
+    def poweroff(self):
+        self.log_heading("Shutting down")
+        # Capital -P
+        self.do_on_qemu("/sbin/shutdown -P now")
+        return self
+
 
 
 def check_for_prerequisites():
@@ -317,6 +348,7 @@ if __name__ == "__main__":
     BuildTarget().log_heading('Beginning Self-VM-Builder run...')
     check_for_prerequisites()
     src = "/media/russell/1TB Internal/self/"
+    print("[bold dark_orange]Building from local source: " + src + '[/bold dark_orange]')
     # script all|target action
     # e.g. script all compile
     #    script NetBSD boot

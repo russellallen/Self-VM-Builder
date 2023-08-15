@@ -6,9 +6,10 @@ from rich import print
 from pathlib import Path
 import random
 
+
 class BuildTarget(object):
 
-    def __init__(self, vm_sources:str = ''):
+    def __init__(self, vm_sources: str = ''):
         self.vmSources = vm_sources
         self.working_dir = 'aDirectory'
         self.iso_filename = 'some.iso'
@@ -27,7 +28,8 @@ class BuildTarget(object):
     #
     #   Logging
     #
-    def log_heading(self, msg: str):
+    @staticmethod
+    def log_heading(msg: str):
         print('[bold blue]' + msg + '[/bold blue]')
 
     #
@@ -97,7 +99,7 @@ class BuildTarget(object):
         pass
 
     def run_qemu(self, with_cdrom=False):
-        self.forwarded_ssh_port = str(random.randint(10000,65535))
+        self.forwarded_ssh_port = str(random.randint(10000, 65535))
         cmd = self.qemu_binary
         if self.use_kvm:
             cmd = cmd + " --enable-kvm "
@@ -164,7 +166,7 @@ class BuildTarget(object):
         self.do_on_qemu(
             # --runAutomaticTests
             # "cd /self/objects ; echo 'tests runVMSuite. benchmarks measurePerformance: 100. _Quit' | " +
-            "cd /self/objects ; /root/build/vm/Self -f worldBuilder.self -o morphic -headless --runAutomaticTests ")
+            "cd /self/objects ; /root/build/vm/Self -f worldBuilder.self -o morphic -headless --runAutomaticTests --snapshotActionPostRead ")
 
     def poweroff(self):
         self.log_heading("Telling VM to shut itself down")
@@ -221,6 +223,9 @@ class NetBSD(BuildTarget):
 
 
 class NetBSDmacppc(BuildTarget):
+    # Openfirmware:  boot cd:\ofwboot.xcg
+    # Then follow NetBSD install
+
 
     def __init__(self, vm_sources):
         super().__init__(vm_sources)
@@ -230,9 +235,9 @@ class NetBSDmacppc(BuildTarget):
         self.iso_url = 'https://cdn.netbsd.org/pub/NetBSD/NetBSD-9.3/images/NetBSD-9.3-macppc.iso'
         self.qcow2 = 'NetBSD-9.3-macppc.qcow2'
         self.chown = '/sbin/chown'
-        self.qemu_binary = 'qemu-system-ppc -M mac99,via=pmu'
+        self.qemu_binary = 'qemu-system-ppc -prom-env \'boot-device=hd:,ofwboot.xcf;1\' '
         self.use_kvm = False
-        self.vm_memory = '2048M'
+        self.vm_memory = '1572'
 
     def initialise_os(self):
         # Add packages
@@ -293,7 +298,7 @@ class Debian(BuildTarget):
         super().__init__(vm_sources)
         self.vm_sources = vm_sources
         self.working_dir = 'Debian'
-        #self.iso_filename = '/debian-11.6.0-i386-netinst.iso'
+        # self.iso_filename = '/debian-11.6.0-i386-netinst.iso'
         self.iso_filename = '/debian-12.1.0-i386-netinst.iso'
         self.iso_url = \
             'https://cdimage.debian.org/debian-cd/current/i386/iso-cd/debian-12.1.0-i386-netinst.iso'
@@ -327,13 +332,13 @@ class Fedora64(BuildTarget):
 
     def initialise_os(self):
         # Add packages
-        self.do_on_qemu('dnf -y groupinstall "Development Tools" ; dnf -y install glibc-devel.i686 libX11-devel.i686 libXext-devel.i686 ncurses-devel.i686 cmake clang')  # vim is for xxdsudo dnf -y install glibc-devel.i686
+        self.do_on_qemu('dnf -y groupinstall "Development Tools" ; dnf -y install glibc-devel.i686 libX11-devel.i686 libXext-devel.i686 ncurses-devel.i686 cmake clang')  # vim is for xxd
+
     def poweroff(self):
         self.log_heading("Shutting down")
         # Capital -P
         self.do_on_qemu("/sbin/shutdown -P now")
         return self
-
 
 
 def check_for_prerequisites():
@@ -343,6 +348,7 @@ def check_for_prerequisites():
         if not subprocess.run('which ' + b, shell=True).returncode == 0:
             print('Could not find `' + b + '` in path.')
             sys.exit(1)
+
 
 if __name__ == "__main__":
     BuildTarget().log_heading('Beginning Self-VM-Builder run...')
@@ -355,7 +361,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 3:
         target = sys.argv[1]
         if target == 'all':
-            i = [NetBSD, FreeBSD, Debian]
+            i = [NetBSD, FreeBSD, Debian, Fedora64]
         else:
             try:
                 i = [getattr(sys.modules[__name__], target)]

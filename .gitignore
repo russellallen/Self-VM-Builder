@@ -1,0 +1,7 @@
+*.iso
+*.qcow2
+pid
+*.out.txt
+Self
+.idea/
+__pycache__

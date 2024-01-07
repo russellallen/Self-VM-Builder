@@ -5,6 +5,7 @@ import time
 from rich import print
 from pathlib import Path
 import random
+import multiprocessing
 
 
 class BuildTarget(object):
@@ -24,17 +25,40 @@ class BuildTarget(object):
         self.vm_memory = '4G'
         self.forwarded_ssh_port = '0'
         self.bash_profile = '~/.profile'
+        self.silent = False
 
     #
     #   Logging
     #
-    @staticmethod
-    def log_heading(msg: str):
-        print('[bold blue]' + msg + '[/bold blue]')
+
+
+    def set_silent(self):
+        self.silent = True
+        return self
+
+    def log_heading(self, msg: str):
+        if not self.silent:
+            print('[bold blue]' + msg + '[/bold blue]')
+        with open(self.log_filename(), "a") as f:
+            f.write('#### ' + msg + '\n')
+
+    def log_note(self, msg: str):
+        if not self.silent:
+            print(msg)
+        with open(self.log_filename(), "a") as f:
+            f.write(msg + '\n')
+
+    def log_filename(self) -> str:
+        return self.working_dir + '/' + self.working_dir + '.out.txt'
+
+    def clean_log(self):
+        # Clean output file
+        os.remove(self.log_filename())
 
     #
     #   Setting Up
     #
+
 
     def install_os_in_vm(self):
         self.download_iso()
@@ -84,6 +108,38 @@ class BuildTarget(object):
     #   Compiling
     #
 
+    def compile_summary(self):
+        self.silent = True
+        self.compile()
+        return self
+
+    def print_summary(self):
+        s = self.silent
+        self.silent = False
+        self.log_heading('Summary')
+        #
+        #   Was binary generated?
+        #
+        successful_build = False
+        with open(self.log_filename(), "r") as f:
+            successful_build = 'Built target Self' in f.read()
+        if successful_build:
+            self.log_note('[bold green]VM Built OK[/bold green]')
+        else:
+            self.log_note('[bold red]VM Build Failed[/bold red]')
+        #
+        #   Did tests run?
+        #
+        successful_test = False
+        with open(self.log_filename(), "r") as f:
+            successful_test = '---END-OF-TESTS---' in f.read()
+        if successful_test:
+            self.log_note('[bold green]VM Tested OK[/bold green]')
+        else:
+            self.log_note('[bold red]VM Tests Failed[/bold red]')
+        self.silent = s
+        return self
+
     def compile(self):
         self.sync_sources()
         self.clean_log()
@@ -108,20 +164,20 @@ class BuildTarget(object):
             cmd = cmd + '-cdrom ' + self.working_dir + '/' + self.iso_filename
         cmd = cmd + " -pidfile " + self.working_dir + '/pid '
         cmd = cmd + " -hda " + self.working_dir + '/' + self.qcow2 + ' '
-        print('QEMU: ' + cmd)
-        subprocess.run(cmd, shell=True)  # , capture_output=True)
+        self.log_note('QEMU: ' + cmd)
+        subprocess.run(cmd, shell=True, capture_output=self.silent)
 
     def boot(self):
         self.log_heading("Removing SSH Key")
-        subprocess.run(["ssh-keygen", "-f", "/home/russell/.ssh/known_hosts", "-R", "[localhost]:" + self.forwarded_ssh_port])
+        subprocess.run(["ssh-keygen", "-f", "/home/russell/.ssh/known_hosts", "-R", "[localhost]:" + self.forwarded_ssh_port], capture_output=self.silent)
         self.log_heading("Booting...")
         self.run_qemu()
         # Wait for ssh
         while subprocess.run('sshpass -p Pass123 ssh -o IdentitiesOnly=yes root@localhost -p ' + self.forwarded_ssh_port + ' -o "StrictHostKeyChecking=no" true',
                              shell=True, capture_output=True).returncode > 0:
             time.sleep(1)
-            print('.', end='', flush=True)
-        print("Connected")
+            print('.', end='', flush=True) if not self.silent else True
+        self.log_note("Connected")
         return self
 
     def sync_sources(self):
@@ -132,24 +188,24 @@ class BuildTarget(object):
         # so we want to make sure files are correct
         cmd = """sshpass -p Pass123 rsync --ignore-times -raz -e 'ssh -o IdentitiesOnly=yes -p """ + self.forwarded_ssh_port + """' '""" + \
               self.vmSources + """' root@localhost:/self"""
-        print(cmd)
+        self.log_note(cmd)
         subprocess.run(cmd, shell=True)
         # Change ownership inside VM
         self.do_on_qemu(self.chown + " -R root /self")
 
-    def clean_log(self):
-        # Clean output file
-        os.remove(self.working_dir + '/' + self.working_dir + '.out.txt')
 
     def print_system_info(self):
+        # For Summary - print this out even if silent
+        s = self.silent
+        self.silent = False
         self.log_heading("Build System Info")
-        self.do_on_qemu("echo ------------------------------------------------------------", silent=True)
-        self.do_on_qemu("echo BUILDING: $(date)", silent=True)
-        self.do_on_qemu("echo OS: $(uname -a)", silent=True)
-        self.do_on_qemu("echo GIT: $(git --version)", silent=True)
-        self.do_on_qemu("echo CMAKE: $(cmake --version)", silent=True)
-        self.do_on_qemu("echo CPP: $(cpp --version)", silent=True)
-        self.do_on_qemu("echo ------------------------------------------------------------", silent=True)
+        self.do_on_qemu("echo $(date)")
+        self.do_on_qemu("echo $(uname -a)")
+        self.do_on_qemu("echo $(git --version)")
+        self.do_on_qemu("echo $(cmake --version)")
+        self.do_on_qemu("echo $(gcc --version)")
+        self.do_on_qemu("echo $(g++ --version)")
+        self.silent = s
 
     def cmake(self):
         self.do_on_qemu("rm -rf /root/build ; mkdir /root/build")
@@ -175,7 +231,7 @@ class BuildTarget(object):
 
     def wait_for_poweroff(self):
         p = Path(self.working_dir + '/pid').read_text()
-        while not os.system('kill -0 ' + p):
+        while not subprocess.run('kill -0 ' + p, shell=True, capture_output=True):
             time.sleep(1)
         os.remove(self.working_dir + '/pid')
         return self
@@ -187,19 +243,15 @@ class BuildTarget(object):
     #
     #   Support
     #
-    def do_on_qemu(self, command, silent=False):
-        if not silent:
-            msg = "[green]> " + command + '[/green]'
-            print(msg)
-            with open(self.working_dir + "/" + self.working_dir + ".out.txt", 'a') as f:
-                f.write(msg)
+    def do_on_qemu(self, command):
+        self.log_note("[green]> " + command + '[/green]')
         b = bytes(command, 'ascii').hex()
         c = "echo " + b + " | xxd -r -p > /tmp/qemu_cmd ; bash /tmp/qemu_cmd"
         subprocess.run(
             "sshpass -p Pass123 ssh -o IdentitiesOnly=yes root@localhost -t -t -q -p " + self.forwarded_ssh_port + " 'source " + self.bash_profile + " > /dev/null; " + c + "' 2>&1 | " +
-            "tee -a " + self.working_dir + "/" + self.working_dir + ".out.txt",
+            "tee -a " + self.log_filename(),
             shell=True,
-            capture_output=silent)
+            capture_output=self.silent)
 
 
 class NetBSD(BuildTarget):
@@ -277,10 +329,14 @@ class FreeBSD(BuildTarget):
         super().__init__(vm_sources)
         self.vm_sources = vm_sources
         self.working_dir = 'FreeBSD'
-        self.iso_filename = 'FreeBSD-13.2-RELEASE-i386-disc1.iso'
+        # self.iso_filename = 'FreeBSD-13.2-RELEASE-i386-disc1.iso'
+        # self.iso_url = \
+        #     'https://download.freebsd.org/releases/i386/i386/ISO-IMAGES/13.2/FreeBSD-13.2-RELEASE-i386-disc1.iso'
+        # self.qcow2 = 'FreeBSD-13.2-RELEASE-i386.qcow2'
+        self.iso_filename = 'FreeBSD-14.0-RELEASE-i386-disc1.iso'
         self.iso_url = \
-            'https://download.freebsd.org/releases/i386/i386/ISO-IMAGES/13.2/FreeBSD-13.2-RELEASE-i386-disc1.iso'
-        self.qcow2 = 'FreeBSD-13.2-RELEASE-i386.qcow2'
+            'https://download.freebsd.org/releases/i386/i386/ISO-IMAGES/14.0/FreeBSD-14.0-RELEASE-i386-disc1.iso'
+        self.qcow2 = 'FreeBSD-14.0-RELEASE-i386.qcow2'
         self.chown = '/usr/sbin/chown'
         self.env_flags = ' CC=gcc CPP=g++ '
         self.cmake_build_options = ' -DCMAKE_BUILD_TYPE=Release '
@@ -289,7 +345,7 @@ class FreeBSD(BuildTarget):
         # Add packages
         self.do_on_qemu('pkg install -y rsync cmake git xxd libX11 libXext gcc bash')
         # So gcc works
-        self.do_on_qemu('echo "libgcc_s.so.1		/usr/local/lib/gcc12/libgcc_s.so.1" >> /etc/libmap.conf')
+        self.do_on_qemu('echo "libgcc_s.so.1  /usr/local/lib/gcc12/libgcc_s.so.1" >> /etc/libmap.conf')
 
 
 class Debian(BuildTarget):
@@ -315,6 +371,28 @@ class Debian(BuildTarget):
         self.do_on_qemu("/sbin/shutdown -P now")
         return self
 
+class Debian64(BuildTarget):
+
+    def __init__(self, vm_sources):
+        super().__init__(vm_sources)
+        self.vm_sources = vm_sources
+        self.working_dir = 'Debian64'
+        self.iso_filename = 'debian-12.1.0-amd64-netinst.iso'
+        self.iso_url = \
+            'https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-12.1.0-amd64-netinst.iso'
+        self.qcow2 = 'debian-12.1.0-amd64.qcow2'
+        self.chown = '/usr/bin/chown'
+
+    def initialise_os(self):
+        # Add packages
+        self.do_on_qemu('apt update')
+        self.do_on_qemu('apt install -y rsync cmake git xxd build-essential libx11-dev:i386 libxext-dev:i386 libncurses-dev:i386 libx32stdc++-12-dev libc6-dev-i386-cross')
+
+    def poweroff(self):
+        self.log_heading("Shutting down")
+        # Capital -P
+        self.do_on_qemu("/sbin/shutdown -P now")
+        return self
 
 class Fedora64(BuildTarget):
 
@@ -342,16 +420,19 @@ class Fedora64(BuildTarget):
 
 
 def check_for_prerequisites():
-    BuildTarget().log_heading('Checking for Prerequisites...')
     r = ['git', 'sshpass', 'qemu-system-x86_64', 'curl', 'qemu-img']
     for b in r:
-        if not subprocess.run('which ' + b, shell=True).returncode == 0:
-            print('Could not find `' + b + '` in path.')
+        if not subprocess.run('which ' + b, shell=True, capture_output=True).returncode == 0:
+            print('While checking for prerequisites, could not find `' + b + '` in path.')
             sys.exit(1)
 
 
+def compile_to_summary(vm):
+    return vm.set_silent().boot().compile_summary().poweroff().wait_for_poweroff()
+
+
 if __name__ == "__main__":
-    BuildTarget().log_heading('Beginning Self-VM-Builder run...')
+    print('Beginning Self-VM-Builder run...')
     check_for_prerequisites()
     src = "/media/russell/1TB Internal/self/"
     print("[bold dark_orange]Building from local source: " + src + '[/bold dark_orange]')
@@ -374,17 +455,27 @@ if __name__ == "__main__":
                 v = vm(vm_sources=src).boot()
                 os.system("sshpass -p Pass123 ssh -o IdentitiesOnly=yes root@localhost -p " + v.forwarded_ssh_port)
                 v.poweroff().wait_for_poweroff()
-        elif action == 'compile':
-            for vm in i:
-                vm(vm_sources=src).boot().compile().poweroff().wait_for_poweroff()
         elif action == 'install':
             for vm in i:
                 vm(vm_sources=src).install_os_in_vm()
+        elif action == 'compile':
+            for vm in i:
+                vm(vm_sources=src).boot().compile().poweroff().wait_for_poweroff()
+        elif action == 'summary':
+            for vm in i:
+                vmi = vm(vm_sources=src) # Instantiate it
+                #  Run for 10 minutes, then kill if not finished
+                p = multiprocessing.Process(target=compile_to_summary,
+                                            args=( vmi, ))
+                p.start()
+                p.join(10*60)
+                if p.is_alive(): p.kill()
+                vmi.print_summary()
         else:
             print("Unknown action: " + action)
             sys.exit(1)
     else:
         print("Wrong! Try again! (No help for YOU!")
         sys.exit(1)
-    BuildTarget().log_heading('Task Finished')
+    print('Task Finished')
     sys.exit(0)
